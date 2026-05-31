@@ -1,0 +1,45 @@
+  {
+  "simulation": {
+    "start_time": "2026-05-30T00:00:00Z",
+    "step_minutes": 15,
+    "bootstrap_minutes": 65
+  },
+  "battery": {
+    "capacity_kwh": 5.0,
+    "starting_soc": 40.0,
+    "min_soc": 40.0,
+    "max_soc": 90.0,
+    "max_charge_power": 2000.0,
+    "max_discharge_power": 2000.0,
+    "charging_efficiency": 0.95,
+    "discharging_efficiency": 0.95,
+    "target_soc": 60.0,
+    "target_time": "06:00:00",
+    "strategy": "BALANCED",
+    "allow_grid_charging": false
+  },
+  "appliances": [
+    {
+      "id": "miner",
+      "name": "Crypto Miner",
+      "entity_id": "switch.miner",
+      "priority": 10,
+      "phases": 1,
+      "nominal_power": 6000.0,
+      "actual_power_entity": "sensor.miner_power",
+      "dynamic_current": true,
+      "current_entity": "number.miner_current",
+      "min_current": 0.4347,
+      "max_current": 26.0869,
+      "is_big_consumer": true,
+      "battery_max_discharge_override": 0.0,
+      "on_only": false,
+      "min_daily_runtime": null,
+      "max_daily_runtime": null,
+      "schedule_deadline": null,
+      "switch_interval": 0,
+      "allow_grid_supplement": false,
+      "max_grid_power": null
+    }
+  ]
+}
