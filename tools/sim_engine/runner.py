@@ -54,6 +54,94 @@ def get_planned_power(appliance_cfg: ApplianceConfig, current_ts: datetime, plan
                     return current * 230.0 * appliance_cfg.phases
     return 0.0
 
+def convert_plan_to_records(
+    plan: Plan,
+    timeline: List[Any],
+    appliance_configs: List[ApplianceConfig],
+    base_load_watts: float,
+    starting_soc: float,
+    battery_config: BatteryConfig,
+    battery_min_soc: float,
+    battery_max_soc: float,
+    max_charge_power: float,
+    max_discharge_power: float,
+    charging_efficiency: float = 0.95,
+    discharging_efficiency: float = 0.95
+) -> List[Dict[str, Any]]:
+    """
+    Converts a Planner Timeline and Plan into a list of records for CSV/HTML export.
+    Estimates Battery SoC evolution based on planned excess/deficit, 
+    respecting min/max SoC and big consumer protections.
+    """
+    records = []
+    current_soc = starting_soc
+    battery_capacity_kwh = battery_config.capacity_kwh if battery_config else 0.0
+    
+    for slot in timeline:
+        # Calculate duration in hours for energy calculations
+        duration_hours = (slot.end - slot.start).total_seconds() / 3600.0
+        
+        record = {
+            "time": slot.start.strftime("%Y-%m-%d %H:%M"),
+            "pv": round(slot.expected_solar_watts, 1),
+            "house_load": round(base_load_watts, 1),
+            "price": round(slot.price, 3),
+            "decision": "Planned Strategy"
+        }
+        
+        # Determine planned power and check for big consumers with battery protection
+        total_appliance_power = 0.0
+        big_consumer_active = False
+        for app in appliance_configs:
+            p_power = get_planned_power(app, slot.start, plan)
+            record[f"{app.id}_planned_power"] = round(p_power, 1)
+            record[f"{app.id}_power"] = 0.0  # No real execution data
+            total_appliance_power += p_power
+            # If a big consumer is active and battery override is 0, it means it CANNOT use the battery
+            if p_power > 0 and app.is_big_consumer and app.battery_max_discharge_override == 0.0:
+                big_consumer_active = True
+            
+        # Estimate Battery evolution
+        # raw_balance = solar - (base_load + appliances)
+        raw_balance = slot.expected_solar_watts - (base_load_watts + total_appliance_power)
+        
+        battery_power = 0.0
+        if battery_capacity_kwh > 0:
+            if raw_balance > 0:
+                # Charge battery (respect max_soc and max_charge_power)
+                remaining_capacity_wh = max(0.0, (battery_max_soc - current_soc) / 100.0 * battery_capacity_kwh * 1000.0)
+                max_charge_by_soc = (remaining_capacity_wh / charging_efficiency) / duration_hours if duration_hours > 0 else 0.0
+                
+                battery_power = min(raw_balance, max_charge_power, max_charge_by_soc)
+                added_wh = battery_power * charging_efficiency * duration_hours
+                current_soc = min(battery_max_soc, current_soc + (added_wh / (battery_capacity_kwh * 1000.0)) * 100.0)
+            elif raw_balance < 0:
+                # Discharge battery (respect min_soc, max_discharge_power and big consumer protection)
+                # If big consumer is active and protection is 0.0, battery CANNOT discharge for it.
+                # However, it could still discharge for base load. This is a simplification.
+                allowed_discharge = 0.0 if big_consumer_active else max_discharge_power
+                
+                needed_wh = abs(raw_balance) * duration_hours
+                available_wh = max(0.0, (current_soc - battery_min_soc) / 100.0 * battery_capacity_kwh * 1000.0)
+                max_discharge_by_soc = (available_wh * discharging_efficiency) / duration_hours if duration_hours > 0 else 0.0
+                
+                battery_power_req = max(raw_balance, -allowed_discharge, -max_discharge_by_soc)
+                battery_power = battery_power_req
+                removed_wh = abs(battery_power) / discharging_efficiency * duration_hours
+                current_soc = max(battery_min_soc, current_soc - (removed_wh / (battery_capacity_kwh * 1000.0)) * 100.0)
+        
+        record["battery_power"] = round(battery_power, 1)
+        record["battery_soc"] = round(current_soc, 2)
+        
+        # Grid estimate
+        grid_balance = raw_balance - battery_power
+        record["grid_export"] = round(max(0.0, grid_balance), 1)
+        record["grid_import"] = round(max(0.0, -grid_balance), 1)
+        
+        records.append(record)
+        
+    return records
+
 def execute_scenario(config_name: str, dataset_name: str, planner_only: bool = False):
     """
     Orchestrates the entire simulation run: loads configs and datasets,
@@ -122,6 +210,27 @@ def execute_scenario(config_name: str, dataset_name: str, planner_only: bool = F
         action_str = str(entry.action.name)
         print(f"{app_id:<15} | {start_str:<6} | {end_str:<6} | {price_str:<6} | {action_str:<15} | {entry.reason.name}")
     print("--- End of Planner Module ---\n\n")
+
+    # --- AUTOMATIC PLANNER DATA EXPORT ---
+    # Re-retrieve timeline to build records
+    timeline = planner.build_timeline(forecast, tariff.windows, base_load_watts=500.0)
+    planner_records = convert_plan_to_records(
+        plan=plan,
+        timeline=timeline,
+        appliance_configs=appliance_configs,
+        base_load_watts=500.0,
+        starting_soc=battery_soc,
+        battery_config=battery_config,
+        battery_min_soc=battery_min_soc,
+        battery_max_soc=battery_max_soc,
+        max_charge_power=max_charge_power,
+        max_discharge_power=max_discharge_power,
+        charging_efficiency=charging_efficiency,
+        discharging_efficiency=discharging_efficiency
+    )
+    export_results_to_csv(planner_records, "simulation_results_planner.csv")
+    generate_plotly_dashboard(planner_records, appliance_configs, "simulation_planner_dashboard.html", is_planner_only=True)
+    # -------------------------------------
     
     if planner_only:
         print("Planner-Only execution completed successfully.")

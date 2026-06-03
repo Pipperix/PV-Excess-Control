@@ -34,7 +34,7 @@
       "is_big_consumer": true,
       "battery_max_discharge_override": 0.0,
       "on_only": false,
-      "min_daily_runtime": null,
+      "min_daily_runtime": "24:00:00",
       "max_daily_runtime": null,
       "schedule_deadline": null,
       "switch_interval": 0,

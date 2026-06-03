@@ -30,7 +30,8 @@ def export_results_to_csv(records: List[Dict[str, Any]], filename: str = "simula
 def generate_plotly_dashboard(
     records: List[Dict[str, Any]], 
     appliance_configs: List[ApplianceConfig],
-    filename: str = "simulation_plotly_dashboard.html"
+    filename: str = "simulation_plotly_dashboard.html",
+    is_planner_only: bool = False
 ):
     """
     Generates an interactive Plotly dashboard comparing planner predictions and real-time outcomes.
@@ -40,6 +41,7 @@ def generate_plotly_dashboard(
         records: List of dictionaries representing metrics recorded at each simulation timestep.
         appliance_configs: List of ApplianceConfig objects to dynamically render comparison curves.
         filename: Name of the output HTML file.
+        is_planner_only: If True, renders only the general energy flow row.
     """
     df = pd.DataFrame(records)
     
@@ -48,15 +50,18 @@ def generate_plotly_dashboard(
     PALETTE = ['#1dd1a1', '#2e86de', '#ff9f43', '#9b59b6', '#ee5253', '#0abde3', '#10ac84', '#5f27cd']
     
     # Create subplots: Row 1 for general energy flow, Row 2 for plan vs reality
+    rows = 1 if is_planner_only else 2
+    subplot_titles = ("<b>Planned Energy Flows & Battery Strategy</b>",) if is_planner_only else (
+        "<b>General Energy Flows & Battery</b>",
+        "<b>Planner Schedule vs Actual Execution</b>"
+    )
+    
     fig = make_subplots(
-        rows=2, cols=1,
+        rows=rows, cols=1,
         shared_xaxes=True,
-        vertical_spacing=0.1,
-        subplot_titles=(
-            "<b>General Energy Flows & Battery</b>",
-            "<b>Planner Schedule vs Actual Execution</b>"
-        ),
-        specs=[[{"secondary_y": True}], [{"secondary_y": False}]]
+        vertical_spacing=0.1 if not is_planner_only else 0,
+        subplot_titles=subplot_titles,
+        specs=[[{"secondary_y": True}]] if is_planner_only else [[{"secondary_y": True}], [{"secondary_y": False}]]
     )
 
     # --- ROW 1: General Energy Flows ---
@@ -106,14 +111,14 @@ def generate_plotly_dashboard(
         row=1, col=1, secondary_y=False,
     )
 
-    # Add actual power traces for all appliances as semi-transparent bars in Row 1
+    # Add actual power traces (or planned power if planner-only) for all appliances as semi-transparent bars in Row 1
     for i, app in enumerate(appliance_configs):
-        actual_col = f"{app.id}_power"
+        power_col = f"{app.id}_planned_power" if is_planner_only else f"{app.id}_power"
         color = PALETTE[i % len(PALETTE)]
-        if actual_col in df.columns:
+        if power_col in df.columns:
             fig.add_trace(
                 go.Bar(
-                    x=df['time'], y=df[actual_col], name=f"{app.name} Power (W)",
+                    x=df['time'], y=df[power_col], name=f"{app.name} Power (W)",
                     marker=dict(color=color, line=dict(width=0)),
                     opacity=0.35
                 ),
@@ -129,33 +134,34 @@ def generate_plotly_dashboard(
         row=1, col=1, secondary_y=True,
     )
 
-    # --- ROW 2: Plan vs Reality Comparison ---
-    # Add comparative lines for all appliances in Row 2
-    for i, app in enumerate(appliance_configs):
-        actual_col = f"{app.id}_power"
-        planned_col = f"{app.id}_planned_power"
-        color = PALETTE[i % len(PALETTE)]
-        
-        # Real-time executed power (solid line with transparent fill)
-        if actual_col in df.columns:
-            fig.add_trace(
-                go.Scatter(
-                    x=df['time'], y=df[actual_col], name=f"{app.name} Real (W)", 
-                    line=dict(color=color, width=2.5),
-                    fill='tozeroy', fillcolor=f'rgba({int(color[1:3], 16)}, {int(color[3:5], 16)}, {int(color[5:7], 16)}, 0.1)'
-                ),
-                row=2, col=1
-            )
-        
-        # Planned schedule power (dotted line)
-        if planned_col in df.columns:
-            fig.add_trace(
-                go.Scatter(
-                    x=df['time'], y=df[planned_col], name=f"{app.name} Plan (W)", 
-                    line=dict(color=color, width=2, dash='dot')
-                ),
-                row=2, col=1
-            )
+    if not is_planner_only:
+        # --- ROW 2: Plan vs Reality Comparison ---
+        # Add comparative lines for all appliances in Row 2
+        for i, app in enumerate(appliance_configs):
+            actual_col = f"{app.id}_power"
+            planned_col = f"{app.id}_planned_power"
+            color = PALETTE[i % len(PALETTE)]
+            
+            # Real-time executed power (solid line with transparent fill)
+            if actual_col in df.columns:
+                fig.add_trace(
+                    go.Scatter(
+                        x=df['time'], y=df[actual_col], name=f"{app.name} Real (W)", 
+                        line=dict(color=color, width=2.5),
+                        fill='tozeroy', fillcolor=f'rgba({int(color[1:3], 16)}, {int(color[3:5], 16)}, {int(color[5:7], 16)}, 0.1)'
+                    ),
+                    row=2, col=1
+                )
+            
+            # Planned schedule power (dotted line)
+            if planned_col in df.columns:
+                fig.add_trace(
+                    go.Scatter(
+                        x=df['time'], y=df[planned_col], name=f"{app.name} Plan (W)", 
+                        line=dict(color=color, width=2, dash='dot')
+                    ),
+                    row=2, col=1
+                )
 
     # Layout styling matching visualize_benchmark.py
     fig.update_layout(
@@ -178,15 +184,15 @@ def generate_plotly_dashboard(
         ),
         hovermode="x unified",
         margin=dict(t=160, b=50, l=60, r=60),
-        height=850
+        height=600 if is_planner_only else 850
     )
 
     # Coordinate y-axes ranges to align their zero lines perfectly
     power_cols = ['pv', 'house_load', 'battery_power', 'grid_import', 'grid_export']
     for app in appliance_configs:
-        actual_col = f"{app.id}_power"
-        if actual_col in df.columns:
-            power_cols.append(actual_col)
+        col = f"{app.id}_planned_power" if is_planner_only else f"{app.id}_power"
+        if col in df.columns:
+            power_cols.append(col)
 
     min_power = df[power_cols].min().min()
     max_power = df[power_cols].max().max()
@@ -204,8 +210,11 @@ def generate_plotly_dashboard(
     # Axes and scales
     fig.update_yaxes(title_text="Power (Watts)", range=[y1_min, y1_max], row=1, col=1, secondary_y=False)
     fig.update_yaxes(title_text="State of Charge (%)", range=[y2_min, y2_max], row=1, col=1, secondary_y=True)
-    fig.update_yaxes(title_text="Power (Watts)", row=2, col=1)
-    fig.update_xaxes(title_text="Time", row=2, col=1)
+    if not is_planner_only:
+        fig.update_yaxes(title_text="Power (Watts)", row=2, col=1)
+        fig.update_xaxes(title_text="Time", row=2, col=1)
+    else:
+        fig.update_xaxes(title_text="Time", row=1, col=1)
 
     output_dir = pathlib.Path(__file__).parent.parent / "output"
     output_dir.mkdir(parents=True, exist_ok=True)
