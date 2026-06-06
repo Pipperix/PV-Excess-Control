@@ -45,6 +45,10 @@ def generate_plotly_dashboard(
     """
     df = pd.DataFrame(records)
     
+    # Unified sign conventions
+    df['grid_power'] = df['grid_import'] - df['grid_export']
+    df['battery_power_plot'] = -df['battery_power']  # >0 means Discharging
+
     # Dynamic colors for appliances
     # Washing machine (first) gets teal (#1dd1a1), Miner (second) gets blue (#2e86de)
     PALETTE = ['#1dd1a1', '#2e86de', '#ff9f43', '#9b59b6', '#ee5253', '#0abde3', '#10ac84', '#5f27cd']
@@ -87,26 +91,17 @@ def generate_plotly_dashboard(
     # Battery Power (W) - Cyan line
     fig.add_trace(
         go.Scatter(
-            x=df['time'], y=df['battery_power'], name="Battery Power (W)", 
+            x=df['time'], y=df['battery_power_plot'], name="Battery Power (W) [>0 Disch]", 
             line=dict(color='#0abde3', width=2)
         ),
         row=1, col=1, secondary_y=False,
     )
 
-    # Grid Import (W) - Red line
+    # Grid Power (W) - Red line
     fig.add_trace(
         go.Scatter(
-            x=df['time'], y=df['grid_import'], name="Grid Import (W)", 
+            x=df['time'], y=df['grid_power'], name="Grid Power (W) [>0 Import]", 
             line=dict(color='#ee5253', width=1.5)
-        ),
-        row=1, col=1, secondary_y=False,
-    )
-    
-    # Grid Export (W) - Purple line
-    fig.add_trace(
-        go.Scatter(
-            x=df['time'], y=df['grid_export'], name="Grid Export (W)", 
-            line=dict(color='#9b59b6', width=1.5)
         ),
         row=1, col=1, secondary_y=False,
     )
@@ -167,28 +162,26 @@ def generate_plotly_dashboard(
     fig.update_layout(
         title={
             'text': "<b>PV Excess Control - Simulation & Planning Dashboard</b>",
-            'y': 0.95,
             'x': 0.5,
-            'xanchor': 'center',
-            'yanchor': 'top'
+            'xanchor': 'center'
         },
         template="plotly_white",
         barmode='overlay',
         legend=dict(
             orientation="h", 
             yanchor="bottom", 
-            y=1.02, 
-            xanchor="right", 
-            x=1,
+            y=1.05, 
+            xanchor="center", 
+            x=0.5,
             bgcolor='rgba(255, 255, 255, 0.7)'
         ),
         hovermode="x unified",
-        margin=dict(t=160, b=50, l=60, r=60),
-        height=600 if is_planner_only else 850
+        margin=dict(t=120, b=80, l=60, r=60),
+        height=600 if is_planner_only else 1000
     )
 
     # Coordinate y-axes ranges to align their zero lines perfectly
-    power_cols = ['pv', 'house_load', 'battery_power', 'grid_import', 'grid_export']
+    power_cols = ['pv', 'house_load', 'battery_power_plot', 'grid_power']
     for app in appliance_configs:
         col = f"{app.id}_planned_power" if is_planner_only else f"{app.id}_power"
         if col in df.columns:
@@ -212,9 +205,11 @@ def generate_plotly_dashboard(
     fig.update_yaxes(title_text="State of Charge (%)", range=[y2_min, y2_max], row=1, col=1, secondary_y=True)
     if not is_planner_only:
         fig.update_yaxes(title_text="Power (Watts)", row=2, col=1)
-        fig.update_xaxes(title_text="Time", row=2, col=1)
+        fig.update_xaxes(title_text="Time", showticklabels=True, row=2, col=1)
+        fig.update_xaxes(showticklabels=True, row=1, col=1)
     else:
-        fig.update_xaxes(title_text="Time", row=1, col=1)
+        fig.update_xaxes(title_text="Time", showticklabels=True, row=1, col=1)
+
 
     output_dir = pathlib.Path(__file__).parent.parent / "output"
     output_dir.mkdir(parents=True, exist_ok=True)

@@ -135,6 +135,7 @@ def load_simulation_config(config_name: str) -> Dict[str, Any]:
             max_current=float(app_data.get("max_current", 0.0)),
             ev_soc_entity=app_data.get("ev_soc_entity"),
             ev_connected_entity=app_data.get("ev_connected_entity"),
+            ev_target_soc=float(app_data["ev_target_soc"]) if app_data.get("ev_target_soc") is not None else None,
             is_big_consumer=bool(app_data.get("is_big_consumer", False)),
             battery_max_discharge_override=float(app_data["battery_max_discharge_override"]) if app_data.get("battery_max_discharge_override") is not None else None,
             on_only=bool(app_data.get("on_only", True)),

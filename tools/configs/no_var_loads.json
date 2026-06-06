@@ -1,0 +1,22 @@
+{
+  "simulation": {
+    "start_time": "2026-03-22T00:00:00Z",
+    "step_minutes": 30,
+    "bootstrap_minutes": 150
+  },
+  "battery": {
+    "capacity_kwh": 10.0,
+    "starting_soc": 50.0,
+    "min_soc": 20.0,
+    "max_soc": 100.0,
+    "max_charge_power": 4000.0,
+    "max_discharge_power": 4000.0,
+    "charging_efficiency": 0.95,
+    "discharging_efficiency": 0.95,
+    "target_soc": 60.0,
+    "target_time": "06:00:00",
+    "strategy": "BALANCED",
+    "allow_grid_charging": false
+  },
+  "appliances": []
+}
