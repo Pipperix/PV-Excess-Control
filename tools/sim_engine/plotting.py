@@ -12,16 +12,19 @@ from typing import List, Dict, Any
 
 from custom_components.pv_excess_control.models import ApplianceConfig
 
-def export_results_to_csv(records: List[Dict[str, Any]], filename: str = "simulation_results.csv"):
+def export_results_to_csv(records: List[Dict[str, Any]], filename: str = "simulation_results.csv", output_subfolder: str = ""):
     """
     Exports simulation records to a CSV file inside the output directory.
     
     Args:
         records: List of dictionaries representing metrics recorded at each simulation timestep.
         filename: Name of the output CSV file.
+        output_subfolder: Optional subdirectory name to group outputs.
     """
     df = pd.DataFrame(records)
     output_dir = pathlib.Path(__file__).parent.parent / "output"
+    if output_subfolder:
+        output_dir = output_dir / output_subfolder
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / filename
     df.to_csv(output_path, index=False)
@@ -31,7 +34,8 @@ def generate_plotly_dashboard(
     records: List[Dict[str, Any]], 
     appliance_configs: List[ApplianceConfig],
     filename: str = "simulation_plotly_dashboard.html",
-    is_planner_only: bool = False
+    is_planner_only: bool = False,
+    output_subfolder: str = ""
 ):
     """
     Generates an interactive Plotly dashboard comparing planner predictions and real-time outcomes.
@@ -42,6 +46,7 @@ def generate_plotly_dashboard(
         appliance_configs: List of ApplianceConfig objects to dynamically render comparison curves.
         filename: Name of the output HTML file.
         is_planner_only: If True, renders only the general energy flow row.
+        output_subfolder: Optional subdirectory name to group outputs.
     """
     df = pd.DataFrame(records)
     
@@ -163,7 +168,9 @@ def generate_plotly_dashboard(
         title={
             'text': "<b>PV Excess Control - Simulation & Planning Dashboard</b>",
             'x': 0.5,
-            'xanchor': 'center'
+            'xanchor': 'center',
+            'y': 0.98,
+            'yref': 'container'
         },
         template="plotly_white",
         barmode='overlay',
@@ -176,7 +183,7 @@ def generate_plotly_dashboard(
             bgcolor='rgba(255, 255, 255, 0.7)'
         ),
         hovermode="x unified",
-        margin=dict(t=120, b=80, l=60, r=60),
+        margin=dict(t=160, b=80, l=60, r=60),
         height=600 if is_planner_only else 1000
     )
 
@@ -212,7 +219,27 @@ def generate_plotly_dashboard(
 
 
     output_dir = pathlib.Path(__file__).parent.parent / "output"
+    if output_subfolder:
+        output_dir = output_dir / output_subfolder
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / filename
     fig.write_html(output_path)
     print(f"Interactive Plotly dashboard saved to: {output_path}")
+
+def export_summary_to_txt(summary_text: str, filename: str = "summary.txt", output_subfolder: str = ""):
+    """
+    Exports the textual summary to a file inside the output directory.
+    
+    Args:
+        summary_text: The entire summary string to be written.
+        filename: Name of the output text file.
+        output_subfolder: Optional subdirectory name to group outputs.
+    """
+    output_dir = pathlib.Path(__file__).parent.parent / "output"
+    if output_subfolder:
+        output_dir = output_dir / output_subfolder
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / filename
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write(summary_text)
+    print(f"Simulation textual summary saved to: {output_path}")

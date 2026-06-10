@@ -28,7 +28,7 @@ from custom_components.pv_excess_control.models import (
 
 from sim_engine.loader import load_simulation_config, load_simulation_dataset
 from sim_engine.physics import simulate_battery_physics
-from sim_engine.plotting import export_results_to_csv, generate_plotly_dashboard
+from sim_engine.plotting import export_results_to_csv, generate_plotly_dashboard, export_summary_to_txt
 
 def get_price_for_time(current_ts: datetime, windows: List[Any]) -> float:
     """Helper to find the dynamic tariff price for a given timestamp."""
@@ -153,6 +153,8 @@ def execute_scenario(config_name: str, dataset_name: str, planner_only: bool = F
         dataset_name: Name of the CSV dataset inside datasets/ (without extension).
         planner_only: If True, halts execution after the planning schedule phase.
     """
+    subfolder = f"{config_name}_{dataset_name}"
+    
     # 1. LOAD CONFIGURATION AND DATASET
     print(f"--- Loading Scenario Configuration: {config_name} ---")
     config = load_simulation_config(config_name)
@@ -228,8 +230,8 @@ def execute_scenario(config_name: str, dataset_name: str, planner_only: bool = F
         charging_efficiency=charging_efficiency,
         discharging_efficiency=discharging_efficiency
     )
-    export_results_to_csv(planner_records, "simulation_results_planner.csv")
-    generate_plotly_dashboard(planner_records, appliance_configs, "simulation_planner_dashboard.html", is_planner_only=True)
+    export_results_to_csv(planner_records, "planner_result.csv", output_subfolder=subfolder)
+    generate_plotly_dashboard(planner_records, appliance_configs, "planner_result.html", is_planner_only=True, output_subfolder=subfolder)
     # -------------------------------------
     
     if planner_only:
@@ -476,5 +478,51 @@ def execute_scenario(config_name: str, dataset_name: str, planner_only: bool = F
         simulation_records.append(record)
         
     # 4. EXPORT OUTPUT REPORTING FILES
-    export_results_to_csv(simulation_records)
-    generate_plotly_dashboard(simulation_records, appliance_configs)
+    export_results_to_csv(simulation_records, "optimization_result.csv", output_subfolder=subfolder)
+    generate_plotly_dashboard(simulation_records, appliance_configs, "optimization_result.html", output_subfolder=subfolder)
+
+    # 5. GENERATE TEXTUAL SUMMARY
+    summary_lines = []
+    summary_lines.append("\n" + "="*60)
+    summary_lines.append("                SIMULATION DAILY SUMMARY")
+    summary_lines.append("="*60)
+    
+    total_pv_wh = 0.0
+    total_import_wh = 0.0
+    total_export_wh = 0.0
+    total_house_load_wh = 0.0
+    appliance_totals_wh = {app.id: 0.0 for app in appliance_configs}
+    
+    for rec in simulation_records:
+        total_pv_wh += rec.get("pv", 0.0) * (step_minutes / 60.0)
+        total_import_wh += rec.get("grid_import", 0.0) * (step_minutes / 60.0)
+        total_export_wh += rec.get("grid_export", 0.0) * (step_minutes / 60.0)
+        total_house_load_wh += rec.get("house_load", 0.0) * (step_minutes / 60.0)
+        for app in appliance_configs:
+            appliance_totals_wh[app.id] += rec.get(f"{app.id}_power", 0.0) * (step_minutes / 60.0)
+            
+    total_consumption_wh = total_house_load_wh + sum(appliance_totals_wh.values())
+    
+    if total_consumption_wh > 0:
+        self_sufficiency = max(0.0, (total_consumption_wh - total_import_wh) / total_consumption_wh * 100.0)
+    else:
+        self_sufficiency = 100.0
+        
+    summary_lines.append(f" Total PV Production:        {total_pv_wh / 1000.0:>8.2f} kWh")
+    summary_lines.append(f" Total Grid Import:          {total_import_wh / 1000.0:>8.2f} kWh")
+    summary_lines.append(f" Total Grid Export:          {total_export_wh / 1000.0:>8.2f} kWh")
+    summary_lines.append(f" Total Consumption:          {total_consumption_wh / 1000.0:>8.2f} kWh")
+    summary_lines.append("-" * 60)
+    summary_lines.append(" Appliance Breakdown:")
+    for app in appliance_configs:
+        summary_lines.append(f"   - {app.name:<21} {appliance_totals_wh[app.id] / 1000.0:>8.2f} kWh")
+    summary_lines.append("-" * 60)
+    final_soc = simulation_records[-1]["battery_soc"] if simulation_records else battery_soc
+    summary_lines.append(f" Final Battery SoC:          {final_soc:>8.1f} %")
+    summary_lines.append(f" Self-Sufficiency:           {self_sufficiency:>8.1f} %")
+    summary_lines.append("="*60 + "\n")
+    
+    summary_text = "\n".join(summary_lines)
+    print(summary_text)
+    
+    export_summary_to_txt(summary_text, "summary.txt", output_subfolder=subfolder)
