@@ -1,8 +1,6 @@
 {
   "simulation": {
-    "start_time": "2026-03-22T00:00:00Z",
-    "step_minutes": 15,
-    "bootstrap_minutes": 150
+    "bootstrap_minutes": 60
   },
   "battery": {
     "capacity_kwh": 10.0,
@@ -54,7 +52,7 @@
       "actual_power_entity": null,
       "dynamic_current": true,
       "current_entity": "number.miner_current",
-      "min_current": 0.0,
+      "min_current": 2.17,
       "max_current": 26.0869,
       "ev_soc_entity": null,
       "ev_connected_entity": null,

@@ -1,8 +1,6 @@
 {
   "simulation": {
-    "start_time": "2026-03-22T00:00:00Z",
-    "step_minutes": 15,
-    "bootstrap_minutes": 150
+    "bootstrap_minutes": 60
   },
   "battery": {
     "capacity_kwh": 10.0,

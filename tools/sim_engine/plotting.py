@@ -73,11 +73,14 @@ def generate_plotly_dashboard(
         specs=[[{"secondary_y": True}]] if is_planner_only else [[{"secondary_y": True}], [{"secondary_y": False}]]
     )
 
+    pv_name = "PV Forecast (W)" if is_planner_only else "PV Production (W)"
+    load_name = "House Load Forecast (W)" if is_planner_only else "House Load (W)"
+
     # --- ROW 1: General Energy Flows ---
     # PV Production (W) - Orange curve
     fig.add_trace(
         go.Scatter(
-            x=df['time'], y=df['pv'], name="PV Production (W)",
+            x=df['time'], y=df['pv'], name=pv_name,
             line=dict(color='#ff9f43', width=2.5),
             fill='tozeroy', fillcolor='rgba(255, 159, 67, 0.1)'
         ),
@@ -87,7 +90,7 @@ def generate_plotly_dashboard(
     # House Load (W) - Blue dashed curve
     fig.add_trace(
         go.Scatter(
-            x=df['time'], y=df['house_load'], name="House Load (W)",
+            x=df['time'], y=df['house_load'], name=load_name,
             line=dict(color='#2e86de', width=2, dash='dash')
         ),
         row=1, col=1, secondary_y=False,

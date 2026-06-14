@@ -72,13 +72,6 @@ def load_simulation_config(config_name: str) -> Dict[str, Any]:
         
     # Standardize simulation section
     sim_sec = config_data.setdefault("simulation", {})
-    if "start_time" in sim_sec:
-        # Convert start time string to timezone-aware UTC datetime
-        dt_str = sim_sec["start_time"].replace("Z", "+00:00")
-        sim_sec["start_time"] = datetime.fromisoformat(dt_str)
-    else:
-        sim_sec["start_time"] = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
-        
     sim_sec.setdefault("step_minutes", 30)
     sim_sec.setdefault("bootstrap_minutes", 150)
     
@@ -152,18 +145,14 @@ def load_simulation_config(config_name: str) -> Dict[str, Any]:
     return config_data
 
 def load_simulation_dataset(
-    dataset_name: str, 
-    start_time: datetime, 
-    step_minutes: int
-) -> Tuple[List[Tuple[int, float, float, float]], TariffInfo, ForecastData]:
+    dataset_name: str
+) -> Tuple[List[Tuple[datetime, float, float, float]], TariffInfo, ForecastData]:
     """
     Loads and parses a time-series CSV file from the datasets directory,
     re-constructing physical simulation timelines, dynamic tariffs, and solar forecasts.
     
     Args:
         dataset_name: Name of the CSV file without extension.
-        start_time: Datetime representing the start of the simulation.
-        step_minutes: Interval in minutes between dataset steps.
         
     Returns:
         A tuple containing:
@@ -180,51 +169,66 @@ def load_simulation_dataset(
     df = pd.read_csv(dataset_file)
     
     # Verify required columns
-    required_cols = {"minute_offset", "pv_power", "house_load"}
+    required_cols = {"timestamp", "pv_power", "house_load"}
     missing = required_cols - set(df.columns)
     if missing:
         raise ValueError(f"Dataset CSV is missing columns: {missing}")
         
-    # Parse run steps: (minute_offset, pv, load, feed_in)
+    # Parse run steps: (timestamp, pv, load, feed_in)
     run_steps = []
     for _, row in df.iterrows():
+        current_ts = pd.to_datetime(row["timestamp"])
+        if current_ts.tzinfo is None:
+            current_ts = current_ts.replace(tzinfo=timezone.utc)
+            
         run_steps.append((
-            int(row["minute_offset"]),
+            current_ts,
             float(row["pv_power"]),
             float(row["house_load"]),
             float(row.get("prod_price", row.get("feed_in_tariff", 0.08)))
         ))
+        
+    # Create _ts column for filtering
+    df["_ts"] = pd.to_datetime(df["timestamp"])
+        
+    dataset_start_time = run_steps[0][0]
+    
+    # Calculate simulation steps for 24h
+    if len(run_steps) > 1:
+        step_minutes = (run_steps[1][0] - run_steps[0][0]).total_seconds() / 60.0
+    else:
+        step_minutes = 15.0
+    
+    num_steps_24h = int((24 * 60) / step_minutes) if step_minutes > 0 else 24
         
     # --- Generate dynamic TariffInfo ---
     cheap_threshold = 0.10
     feed_in = 0.08
     battery_charge_threshold = 0.05
     
-    # Parse hourly tariff windows
+    # Parse tariff windows at dataset granularity
     tariff_windows = []
-    # If the CSV has a tariff_price column, we group hourly to create 24 tariff windows.
-    # Otherwise, fallback to a standard pricing structure.
-    for hour_offset in range(24):
-        slot_start = start_time + timedelta(hours=hour_offset)
-        slot_end = slot_start + timedelta(hours=1)
+    for step_idx in range(num_steps_24h):
+        slot_start = dataset_start_time + timedelta(minutes=step_idx * step_minutes)
+        slot_end = slot_start + timedelta(minutes=step_minutes)
         
-        # Filter CSV records that fall in this hour
-        hour_records = df[
-            (df["minute_offset"] >= hour_offset * 60) & 
-            (df["minute_offset"] < (hour_offset + 1) * 60)
+        # Filter CSV records that fall exactly in this step
+        # Since the step exactly matches the dataset row, this will typically select 1 row.
+        step_records = df[
+            (df["_ts"] >= pd.to_datetime(slot_start).tz_localize(None) if df["_ts"].dt.tz is None else pd.to_datetime(slot_start)) & 
+            (df["_ts"] < pd.to_datetime(slot_end).tz_localize(None) if df["_ts"].dt.tz is None else pd.to_datetime(slot_end))
         ]
         
-        if not hour_records.empty and "tariff_price" in df.columns:
-            price = float(hour_records["tariff_price"].mean())
+        if not step_records.empty and "tariff_price" in df.columns:
+            price = float(step_records["tariff_price"].mean())
         else:
-            # Fallback to default mock tariff rules if not present in CSV
             hour_of_day = slot_start.hour
             if 1 <= hour_of_day <= 4:
-                price = 0.05  # Super cheap night
+                price = 0.05
             elif 18 <= hour_of_day <= 22:
-                price = 0.30  # Expensive evening peak
+                price = 0.30
             else:
-                price = 0.20  # Normal
+                price = 0.20
                 
         tariff_windows.append(TariffWindow(
             start=slot_start,
@@ -245,27 +249,25 @@ def load_simulation_dataset(
     hourly_forecasts = []
     total_kwh = 0.0
     
-    for hour_offset in range(24):
-        slot_start = start_time + timedelta(hours=hour_offset)
-        slot_end = slot_start + timedelta(hours=1)
+    for step_idx in range(num_steps_24h):
+        slot_start = dataset_start_time + timedelta(minutes=step_idx * step_minutes)
+        slot_end = slot_start + timedelta(minutes=step_minutes)
         
-        # Filter CSV records that fall in this hour
-        hour_records = df[
-            (df["minute_offset"] >= hour_offset * 60) & 
-            (df["minute_offset"] < (hour_offset + 1) * 60)
+        step_records = df[
+            (df["_ts"] >= pd.to_datetime(slot_start).tz_localize(None) if df["_ts"].dt.tz is None else pd.to_datetime(slot_start)) & 
+            (df["_ts"] < pd.to_datetime(slot_end).tz_localize(None) if df["_ts"].dt.tz is None else pd.to_datetime(slot_end))
         ]
         
-        if not hour_records.empty and "forecast_pv_power" in df.columns:
-            expected_watts = float(hour_records["forecast_pv_power"].mean())
+        if not step_records.empty and "forecast_pv_power" in df.columns:
+            expected_watts = float(step_records["forecast_pv_power"].mean())
         else:
-            # Fallback mock forecast solar tomorrow
             hour_of_day = slot_start.hour
             if 8 <= hour_of_day <= 16:
                 expected_watts = 4000.0
             else:
                 expected_watts = 0.0
                 
-        expected_kwh = expected_watts / 1000.0
+        expected_kwh = expected_watts * (step_minutes / 60.0) / 1000.0
         hourly_forecasts.append(HourlyForecast(
             start=slot_start,
             end=slot_end,

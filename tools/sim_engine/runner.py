@@ -54,9 +54,17 @@ def get_planned_power(appliance_cfg: ApplianceConfig, current_ts: datetime, plan
                     return current * 230.0 * appliance_cfg.phases
     return 0.0
 
+def get_expected_pv(current_ts: datetime, timeline: List[Any]) -> float:
+    for slot in timeline:
+        if slot.start <= current_ts < slot.end:
+            return slot.expected_solar_watts
+    return 0.0
+
 def convert_plan_to_records(
     plan: Plan,
     timeline: List[Any],
+    dataset: List[Tuple[datetime, float, float, float]],
+    tariff_windows: List[Any],
     appliance_configs: List[ApplianceConfig],
     base_load_watts: float,
     starting_soc: float,
@@ -70,22 +78,30 @@ def convert_plan_to_records(
 ) -> List[Dict[str, Any]]:
     """
     Converts a Planner Timeline and Plan into a list of records for CSV/HTML export.
-    Estimates Battery SoC evolution based on planned excess/deficit, 
-    respecting min/max SoC and big consumer protections.
+    Uses the dataset timestamps to provide high-resolution output matching the optimizer.
     """
     records = []
     current_soc = starting_soc
     battery_capacity_kwh = battery_config.capacity_kwh if battery_config else 0.0
     
-    for slot in timeline:
-        # Calculate duration in hours for energy calculations
-        duration_hours = (slot.end - slot.start).total_seconds() / 3600.0
+    if len(dataset) > 1:
+        step_hours = (dataset[1][0] - dataset[0][0]).total_seconds() / 3600.0
+    else:
+        step_hours = 0.25
+
+    for current_ts, _, _, _ in dataset:
+        if (current_ts - dataset[0][0]).total_seconds() >= 86400:
+            break
+            
+        duration_hours = step_hours
+        expected_pv = get_expected_pv(current_ts, timeline)
+        price = get_price_for_time(current_ts, tariff_windows)
         
         record = {
-            "time": slot.start.strftime("%Y-%m-%d %H:%M"),
-            "pv": round(slot.expected_solar_watts, 1),
+            "time": current_ts.strftime("%Y-%m-%d %H:%M"),
+            "pv": round(expected_pv, 1),
             "house_load": round(base_load_watts, 1),
-            "price": round(slot.price, 3),
+            "price": round(price, 3),
             "decision": "Planned Strategy"
         }
         
@@ -93,7 +109,7 @@ def convert_plan_to_records(
         total_appliance_power = 0.0
         big_consumer_active = False
         for app in appliance_configs:
-            p_power = get_planned_power(app, slot.start, plan)
+            p_power = get_planned_power(app, current_ts, plan)
             record[f"{app.id}_planned_power"] = round(p_power, 1)
             record[f"{app.id}_power"] = 0.0  # No real execution data
             total_appliance_power += p_power
@@ -102,13 +118,12 @@ def convert_plan_to_records(
                 big_consumer_active = True
             
         # Estimate Battery evolution
-        # raw_balance = solar - (base_load + appliances)
-        raw_balance = slot.expected_solar_watts - (base_load_watts + total_appliance_power)
+        raw_balance = expected_pv - (base_load_watts + total_appliance_power)
         
         battery_power = 0.0
         if battery_capacity_kwh > 0:
             if raw_balance > 0:
-                # Charge battery (respect max_soc and max_charge_power)
+                # Charge battery
                 remaining_capacity_wh = max(0.0, (battery_max_soc - current_soc) / 100.0 * battery_capacity_kwh * 1000.0)
                 max_charge_by_soc = (remaining_capacity_wh / charging_efficiency) / duration_hours if duration_hours > 0 else 0.0
                 
@@ -116,9 +131,7 @@ def convert_plan_to_records(
                 added_wh = battery_power * charging_efficiency * duration_hours
                 current_soc = min(battery_max_soc, current_soc + (added_wh / (battery_capacity_kwh * 1000.0)) * 100.0)
             elif raw_balance < 0:
-                # Discharge battery (respect min_soc, max_discharge_power and big consumer protection)
-                # If big consumer is active and protection is 0.0, battery CANNOT discharge for it.
-                # However, it could still discharge for base load. This is a simplification.
+                # Discharge battery
                 allowed_discharge = 0.0 if big_consumer_active else max_discharge_power
                 
                 needed_wh = abs(raw_balance) * duration_hours
@@ -159,8 +172,6 @@ def execute_scenario(config_name: str, dataset_name: str, planner_only: bool = F
     print(f"--- Loading Scenario Configuration: {config_name} ---")
     config = load_simulation_config(config_name)
     
-    start_time = config["simulation"]["start_time"]
-    step_minutes = config["simulation"]["step_minutes"]
     bootstrap_minutes = config["simulation"]["bootstrap_minutes"]
     
     appliance_configs = config["appliance_configs"]
@@ -177,7 +188,19 @@ def execute_scenario(config_name: str, dataset_name: str, planner_only: bool = F
     discharging_efficiency = config["discharging_efficiency"]
     
     print(f"--- Loading Time-series Dataset: {dataset_name} ---")
-    dataset, tariff, forecast = load_simulation_dataset(dataset_name, start_time, step_minutes)
+    dataset, tariff, forecast = load_simulation_dataset(dataset_name)
+    
+    if not dataset:
+        print("Error: Dataset is empty.")
+        return
+        
+    start_time = dataset[0][0]
+    
+    # Calculate step minutes dynamically from dataset
+    if len(dataset) > 1:
+        step_minutes = (dataset[1][0] - dataset[0][0]).total_seconds() / 60.0
+    else:
+        step_minutes = 30.0 # safe fallback
     
     # 2. RUN PLANNER SCHEDULE
     print("--- Starting PV Excess Control Planner Module ---")
@@ -219,6 +242,8 @@ def execute_scenario(config_name: str, dataset_name: str, planner_only: bool = F
     planner_records = convert_plan_to_records(
         plan=plan,
         timeline=timeline,
+        dataset=dataset,
+        tariff_windows=tariff.windows,
         appliance_configs=appliance_configs,
         base_load_watts=500.0,
         starting_soc=battery_soc,
@@ -265,9 +290,9 @@ def execute_scenario(config_name: str, dataset_name: str, planner_only: bool = F
     # representing nighttime conditions (0W PV, 300W house load, starting battery SoC).
     # These timestamps are placed just before the simulation start so the optimizer
     # can compute a meaningful average from the very first real timestep.
-    bootstrap_steps = bootstrap_minutes // step_minutes
+    bootstrap_steps = int(bootstrap_minutes / step_minutes)
     for i in range(bootstrap_steps):
-        bootstrap_ts = start_time - timedelta(minutes=(bootstrap_steps - i) * step_minutes)
+        bootstrap_ts = start_time - timedelta(seconds=int((bootstrap_steps - i) * step_minutes * 60))
         bootstrap_ps = PowerState(
             pv_production=0.0,
             grid_export=0.0,
@@ -290,6 +315,7 @@ def execute_scenario(config_name: str, dataset_name: str, planner_only: bool = F
     # physics calculation at the NEXT timestep, creating the closed-loop feedback loop.
     last_max_discharge_watts = max_discharge_power
     
+
     # Print table header for CLI logs (Dynamic to support configured appliances)
     header_parts = ["Time", "Price", "PV", "Load", "Batt%", "BattW", "GridEx"]
     for app in appliance_configs:
@@ -300,10 +326,9 @@ def execute_scenario(config_name: str, dataset_name: str, planner_only: bool = F
     print("-" * len(header_str))
     
     # Main simulation loop over CSV dataset profile
-    for offset, pv, house_load, feed_in in dataset:
-        if offset >= 1440:
+    for current_ts, pv, house_load, feed_in in dataset:
+        if (current_ts - dataset[0][0]).total_seconds() >= 86400: # 1 day max
             break
-        current_ts = start_time + timedelta(minutes=offset)
         
         # Update dynamic tariff price and feed-in for the current time step
         tariff.current_price = get_price_for_time(current_ts, tariff.windows)
@@ -350,7 +375,7 @@ def execute_scenario(config_name: str, dataset_name: str, planner_only: bool = F
         
         # Cap the history based on the step_minutes to keep the averaging window
         # relevant (approximately 20 minutes) and prevent stale data from delaying reactions.
-        history_cap = max(1, 20 // step_minutes)
+        history_cap = max(1, int(20 / step_minutes))
         if len(power_history) > history_cap:
             power_history.pop(0)
             
@@ -393,9 +418,13 @@ def execute_scenario(config_name: str, dataset_name: str, planner_only: bool = F
             if action == Action.ON:
                 if not app_states[app_id]["is_on"]:
                     app_states[app_id]["is_on"] = True
-                    app_states[app_id]["current_power"] = config_by_id[app_id].nominal_power
-                    if config_by_id[app_id].dynamic_current:
-                        app_states[app_id]["current_amperage"] = config_by_id[app_id].nominal_power / 230.0
+                    if config_by_id[app_id].dynamic_current and decision.target_current is not None:
+                        app_states[app_id]["current_amperage"] = decision.target_current
+                        app_states[app_id]["current_power"] = decision.target_current * 230.0 * config_by_id[app_id].phases
+                    else:
+                        app_states[app_id]["current_power"] = config_by_id[app_id].nominal_power
+                        if config_by_id[app_id].dynamic_current:
+                            app_states[app_id]["current_amperage"] = config_by_id[app_id].nominal_power / 230.0
                 # If already ON, Action.ON (staying on) maintains the current_power/amperage
             elif action == Action.OFF:
                 app_states[app_id]["is_on"] = False
@@ -440,7 +469,7 @@ def execute_scenario(config_name: str, dataset_name: str, planner_only: bool = F
                     break
                     
         # Log to stdout at 15-minute intervals or on state changes
-        if offset % 15 == 0 or has_state_changed:
+        if (current_ts.minute % 15 == 0 and current_ts.second == 0) or has_state_changed:
             row_parts = [
                 time_str,
                 price_str,

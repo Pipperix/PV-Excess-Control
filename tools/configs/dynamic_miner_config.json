@@ -1,8 +1,6 @@
-  {
+{
   "simulation": {
-    "start_time": "2026-05-30T00:00:00Z",
-    "step_minutes": 15,
-    "bootstrap_minutes": 65
+    "bootstrap_minutes": 60
   },
   "battery": {
     "capacity_kwh": 10.0,
@@ -29,7 +27,7 @@
       "actual_power_entity": "sensor.miner_power",
       "dynamic_current": true,
       "current_entity": "number.miner_current",
-      "min_current": 0.0,
+      "min_current": 2.17,
       "max_current": 26.0869,
       "is_big_consumer": true,
       "battery_max_discharge_override": 0.0,
