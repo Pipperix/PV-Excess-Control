@@ -35,18 +35,22 @@ def generate_plotly_dashboard(
     appliance_configs: List[ApplianceConfig],
     filename: str = "simulation_plotly_dashboard.html",
     is_planner_only: bool = False,
-    output_subfolder: str = ""
+    output_subfolder: str = "",
+    config_name: str = "",
+    scenario_name: str = ""
 ):
     """
-    Generates an interactive Plotly dashboard comparing planner predictions and real-time outcomes.
+    Generates an interactive Plotly dashboard showing energy flows and battery strategy.
     Outputs the dashboard inside the output directory.
     
     Args:
         records: List of dictionaries representing metrics recorded at each simulation timestep.
         appliance_configs: List of ApplianceConfig objects to dynamically render comparison curves.
         filename: Name of the output HTML file.
-        is_planner_only: If True, renders only the general energy flow row.
+        is_planner_only: If True, renders the planning forecast flow dashboard.
         output_subfolder: Optional subdirectory name to group outputs.
+        config_name: Name of the configuration.
+        scenario_name: Name of the scenario (dataset).
     """
     df = pd.DataFrame(records)
     
@@ -55,28 +59,17 @@ def generate_plotly_dashboard(
     df['battery_power_plot'] = -df['battery_power']  # >0 means Discharging
 
     # Dynamic colors for appliances
-    # Washing machine (first) gets teal (#1dd1a1), Miner (second) gets blue (#2e86de)
     PALETTE = ['#1dd1a1', '#2e86de', '#ff9f43', '#9b59b6', '#ee5253', '#0abde3', '#10ac84', '#5f27cd']
     
-    # Create subplots: Row 1 for general energy flow, Row 2 for plan vs reality
-    rows = 1 if is_planner_only else 2
-    subplot_titles = ("<b>Planned Energy Flows & Battery Strategy</b>",) if is_planner_only else (
-        "<b>General Energy Flows & Battery</b>",
-        "<b>Planner Schedule vs Actual Execution</b>"
-    )
-    
+    # Create subplot: Row 1 with primary and secondary y-axes
     fig = make_subplots(
-        rows=rows, cols=1,
-        shared_xaxes=True,
-        vertical_spacing=0.1 if not is_planner_only else 0,
-        subplot_titles=subplot_titles,
-        specs=[[{"secondary_y": True}]] if is_planner_only else [[{"secondary_y": True}], [{"secondary_y": False}]]
+        rows=1, cols=1,
+        specs=[[{"secondary_y": True}]]
     )
 
     pv_name = "PV Forecast (W)" if is_planner_only else "PV Production (W)"
     load_name = "House Load Forecast (W)" if is_planner_only else "House Load (W)"
 
-    # --- ROW 1: General Energy Flows ---
     # PV Production (W) - Orange curve
     fig.add_trace(
         go.Scatter(
@@ -114,14 +107,26 @@ def generate_plotly_dashboard(
         row=1, col=1, secondary_y=False,
     )
 
-    # Add actual power traces (or planned power if planner-only) for all appliances as semi-transparent bars in Row 1
+    # Add power traces for all appliances as semi-transparent bars
     for i, app in enumerate(appliance_configs):
         power_col = f"{app.id}_planned_power" if is_planner_only else f"{app.id}_power"
-        color = PALETTE[i % len(PALETTE)]
+        
+        app_id_lower = app.id.lower()
+        app_name_lower = app.name.lower()
+        if "miner" in app_id_lower or "miner" in app_name_lower:
+            display_name = "Miner"
+            color = "#2ecc71"  # Green
+        elif "washing" in app_id_lower or "washing" in app_name_lower:
+            display_name = "Washing Machine"
+            color = "#3498db"  # Blue
+        else:
+            display_name = app.name
+            color = PALETTE[i % len(PALETTE)]
+
         if power_col in df.columns:
             fig.add_trace(
                 go.Bar(
-                    x=df['time'], y=df[power_col], name=f"{app.name} Power (W)",
+                    x=df['time'], y=df[power_col], name=f"{display_name} (W)",
                     marker=dict(color=color, line=dict(width=0)),
                     opacity=0.35
                 ),
@@ -137,39 +142,42 @@ def generate_plotly_dashboard(
         row=1, col=1, secondary_y=True,
     )
 
-    if not is_planner_only:
-        # --- ROW 2: Plan vs Reality Comparison ---
-        # Add comparative lines for all appliances in Row 2
-        for i, app in enumerate(appliance_configs):
-            actual_col = f"{app.id}_power"
-            planned_col = f"{app.id}_planned_power"
-            color = PALETTE[i % len(PALETTE)]
-            
-            # Real-time executed power (solid line with transparent fill)
-            if actual_col in df.columns:
-                fig.add_trace(
-                    go.Scatter(
-                        x=df['time'], y=df[actual_col], name=f"{app.name} Real (W)", 
-                        line=dict(color=color, width=2.5),
-                        fill='tozeroy', fillcolor=f'rgba({int(color[1:3], 16)}, {int(color[3:5], 16)}, {int(color[5:7], 16)}, 0.1)'
-                    ),
-                    row=2, col=1
-                )
-            
-            # Planned schedule power (dotted line)
-            if planned_col in df.columns:
-                fig.add_trace(
-                    go.Scatter(
-                        x=df['time'], y=df[planned_col], name=f"{app.name} Plan (W)", 
-                        line=dict(color=color, width=2, dash='dot')
-                    ),
-                    row=2, col=1
-                )
+    # Buy Price (€/kWh) - Invisible trace for hover only
+    if 'buy_price' in df.columns:
+        fig.add_trace(
+            go.Scatter(
+                x=df['time'], y=df['buy_price'], name="Buy Price (€/kWh)", 
+                line=dict(width=0),
+                marker=dict(opacity=0),
+                showlegend=False
+            ),
+            row=1, col=1, secondary_y=True,
+        )
 
-    # Layout styling matching visualize_benchmark.py
+    # Sell Price (€/kWh) - Invisible trace for hover only
+    if 'sell_price' in df.columns:
+        fig.add_trace(
+            go.Scatter(
+                x=df['time'], y=df['sell_price'], name="Sell Price (€/kWh)", 
+                line=dict(width=0),
+                marker=dict(opacity=0),
+                showlegend=False
+            ),
+            row=1, col=1, secondary_y=True,
+        )
+
+    # Format names for display
+    display_config = config_name.replace("_", " ").title()
+    display_scenario = scenario_name.replace("scenario_", "").replace("Scenario_", "")
+
+    if is_planner_only:
+        title_text = f"<b>PV Excess Control Planner - {display_config} {display_scenario}</b>"
+    else:
+        title_text = f"<b>PV Excess Control Optimization - {display_config} {display_scenario}</b>"
+
     fig.update_layout(
         title={
-            'text': "<b>PV Excess Control - Simulation & Planning Dashboard</b>",
+            'text': title_text,
             'x': 0.5,
             'xanchor': 'center',
             'y': 0.98,
@@ -187,7 +195,7 @@ def generate_plotly_dashboard(
         ),
         hovermode="x unified",
         margin=dict(t=160, b=80, l=60, r=60),
-        height=600 if is_planner_only else 1000
+        height=600
     )
 
     # Coordinate y-axes ranges to align their zero lines perfectly
@@ -213,13 +221,7 @@ def generate_plotly_dashboard(
     # Axes and scales
     fig.update_yaxes(title_text="Power (Watts)", range=[y1_min, y1_max], row=1, col=1, secondary_y=False)
     fig.update_yaxes(title_text="State of Charge (%)", range=[y2_min, y2_max], row=1, col=1, secondary_y=True)
-    if not is_planner_only:
-        fig.update_yaxes(title_text="Power (Watts)", row=2, col=1)
-        fig.update_xaxes(title_text="Time", showticklabels=True, row=2, col=1)
-        fig.update_xaxes(showticklabels=True, row=1, col=1)
-    else:
-        fig.update_xaxes(title_text="Time", showticklabels=True, row=1, col=1)
-
+    fig.update_xaxes(title_text="Time", showticklabels=True, row=1, col=1)
 
     output_dir = pathlib.Path(__file__).parent.parent / "output"
     if output_subfolder:
@@ -228,6 +230,109 @@ def generate_plotly_dashboard(
     output_path = output_dir / filename
     fig.write_html(output_path)
     print(f"Interactive Plotly dashboard saved to: {output_path}")
+
+def generate_comparison_dashboard(
+    records: List[Dict[str, Any]], 
+    appliance_configs: List[ApplianceConfig],
+    filename: str = "optimization_comparison.html",
+    output_subfolder: str = "",
+    config_name: str = "",
+    scenario_name: str = ""
+):
+    """
+    Generates an interactive Plotly dashboard comparing planner schedules with real-time execution.
+    Outputs the dashboard inside the output directory.
+    
+    Args:
+        records: List of dictionaries representing metrics recorded at each simulation timestep.
+        appliance_configs: List of ApplianceConfig objects to dynamically render comparison curves.
+        filename: Name of the output HTML file.
+        output_subfolder: Optional subdirectory name to group outputs.
+        config_name: Name of the configuration.
+        scenario_name: Name of the scenario (dataset).
+    """
+    df = pd.DataFrame(records)
+    
+    # Dynamic colors for appliances
+    PALETTE = ['#1dd1a1', '#2e86de', '#ff9f43', '#9b59b6', '#ee5253', '#0abde3', '#10ac84', '#5f27cd']
+    
+    fig = go.Figure()
+
+    # Add comparative lines for all appliances
+    for i, app in enumerate(appliance_configs):
+        actual_col = f"{app.id}_power"
+        planned_col = f"{app.id}_planned_power"
+        
+        app_id_lower = app.id.lower()
+        app_name_lower = app.name.lower()
+        if "miner" in app_id_lower or "miner" in app_name_lower:
+            display_name = "Miner"
+            color = "#2ecc71"  # Green
+        elif "washing" in app_id_lower or "washing" in app_name_lower:
+            display_name = "Washing Machine"
+            color = "#3498db"  # Blue
+        else:
+            display_name = app.name
+            color = PALETTE[i % len(PALETTE)]
+        
+        # Real-time executed power (solid line with transparent fill)
+        if actual_col in df.columns:
+            fig.add_trace(
+                go.Scatter(
+                    x=df['time'], y=df[actual_col], name=f"{display_name} Real (W)", 
+                    line=dict(color=color, width=2.5),
+                    fill='tozeroy', fillcolor=f'rgba({int(color[1:3], 16)}, {int(color[3:5], 16)}, {int(color[5:7], 16)}, 0.1)'
+                )
+            )
+        
+        # Planned schedule power (dotted line)
+        if planned_col in df.columns:
+            fig.add_trace(
+                go.Scatter(
+                    x=df['time'], y=df[planned_col], name=f"{display_name} Plan (W)", 
+                    line=dict(color=color, width=2, dash='dot')
+                )
+            )
+
+    # Format names for display
+    display_config = config_name.replace("_", " ").title()
+    display_scenario = scenario_name.replace("scenario_", "").replace("Scenario_", "")
+
+    # Layout styling matching generate_plotly_dashboard
+    fig.update_layout(
+        title={
+            'text': f"<b>PV Excess Control - Planner Schedule vs Actual Execution <br> {display_config} {display_scenario}</b>",
+            'x': 0.5,
+            'xanchor': 'center',
+            'y': 0.92,
+            'yanchor': 'top'
+        },
+        template="plotly_white",
+        legend=dict(
+            orientation="h", 
+            yanchor="bottom", 
+            y=1.02, 
+            xanchor="center", 
+            x=0.5,
+            bgcolor='rgba(255, 255, 255, 0.7)'
+        ),
+        hovermode="x unified",
+        margin=dict(t=120, b=80, l=60, r=60),
+        height=600
+    )
+
+    fig.update_yaxes(title_text="Power (Watts)")
+    fig.update_xaxes(title_text="Time")
+
+    output_dir = pathlib.Path(__file__).parent.parent / "output"
+    if output_subfolder:
+        output_dir = output_dir / output_subfolder
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / filename
+    fig.write_html(output_path)
+    print(f"Interactive comparison dashboard saved to: {output_path}")
+
+
 
 def export_summary_to_txt(summary_text: str, filename: str = "summary.txt", output_subfolder: str = ""):
     """
