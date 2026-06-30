@@ -1024,6 +1024,7 @@ class Planner:
         current_soc: float | None,
         export_limit: float | None,
         base_load_watts: float = 500.0,
+        now: datetime | None = None,
     ) -> Plan:
         """Create a complete plan for the next 24 hours.
 
@@ -1043,11 +1044,18 @@ class Planner:
             current_soc: Current battery SoC (0-100), or None if no battery.
             export_limit: Feed-in limit in watts, or None.
             base_load_watts: Household base load in watts.
+            now: Optional current datetime to override real-world time.
 
         Returns:
             A complete Plan for the planning horizon.
         """
-        now = datetime.now(self.tz)
+        if now is None:
+            now = datetime.now(self.tz)
+        else:
+            if now.tzinfo is None:
+                now = now.replace(tzinfo=self.tz)
+            else:
+                now = now.astimezone(self.tz)
 
         # 1. Build timeline
         timeline = self.build_timeline(forecast, tariff.windows, base_load_watts)

@@ -30,12 +30,12 @@
       "min_current": 2.17,
       "max_current": 26.0869,
       "is_big_consumer": true,
-      "battery_max_discharge_override": 500.0,
+      "battery_max_discharge_override": 1000.0,
       "on_only": false,
       "min_daily_runtime": null,
       "max_daily_runtime": null,
       "schedule_deadline": null,
-      "switch_interval": 0,
+      "switch_interval": 120,
       "allow_grid_supplement": false,
       "max_grid_power": null
     }

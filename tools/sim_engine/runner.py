@@ -28,7 +28,7 @@ from custom_components.pv_excess_control.models import (
 
 from sim_engine.loader import load_simulation_config, load_simulation_dataset
 from sim_engine.physics import simulate_battery_physics
-from sim_engine.plotting import export_results_to_csv, generate_plotly_dashboard, export_summary_to_txt
+from sim_engine.plotting import export_results_to_csv, generate_plotly_dashboard, generate_comparison_dashboard, export_summary_to_txt
 
 def get_price_for_time(current_ts: datetime, windows: List[Any]) -> float:
     """Helper to find the dynamic tariff price for a given timestamp."""
@@ -102,6 +102,8 @@ def convert_plan_to_records(
             "pv": round(expected_pv, 1),
             "house_load": round(base_load_watts, 1),
             "price": round(price, 3),
+            "buy_price": price,
+            "sell_price": tariff_windows[0].price if not hasattr(tariff_windows[0], "feed_in_tariff") else 0.08, # Just a placeholder for planner
             "decision": "Planned Strategy"
         }
         
@@ -219,7 +221,8 @@ def execute_scenario(config_name: str, dataset_name: str, planner_only: bool = F
         battery_config=battery_config,
         current_soc=battery_soc,
         export_limit=None,
-        base_load_watts=500.0  # Base load matching the original implementation
+        base_load_watts=500.0,  # Base load matching the original implementation
+        now=start_time
     )
     
     # Output planner schedule details
@@ -256,7 +259,7 @@ def execute_scenario(config_name: str, dataset_name: str, planner_only: bool = F
         discharging_efficiency=discharging_efficiency
     )
     export_results_to_csv(planner_records, "planner_result.csv", output_subfolder=subfolder)
-    generate_plotly_dashboard(planner_records, appliance_configs, "planner_result.html", is_planner_only=True, output_subfolder=subfolder)
+    generate_plotly_dashboard(planner_records, appliance_configs, "planner_result.html", is_planner_only=True, output_subfolder=subfolder, config_name=config_name, scenario_name=dataset_name)
     # -------------------------------------
     
     if planner_only:
@@ -275,7 +278,8 @@ def execute_scenario(config_name: str, dataset_name: str, planner_only: bool = F
             "current_power": 0.0,
             "current_amperage": None,
             "runtime": timedelta(0),
-            "last_reason": ""
+            "last_reason": "",
+            "last_state_change": None
         }
         
     power_history = []
@@ -412,31 +416,57 @@ def execute_scenario(config_name: str, dataset_name: str, planner_only: bool = F
             app_id = decision.appliance_id
             action = decision.action
             reason = decision.reason
-            app_states[app_id]["last_reason"] = reason
-            all_reasons.append(f"{config_by_id[app_id].name}: {reason}")
+            app_cfg = config_by_id[app_id]
+            app_state = app_states[app_id]
+            is_on = app_state["is_on"]
+
+            # --- SWITCH INTERVAL COOLDOWN LOGIC ---
+            if not decision.bypasses_cooldown:
+                # Cooldown does not apply to dynamic modulation (SET_CURRENT) if already ON
+                if action != Action.SET_CURRENT or not is_on:
+                    last_change = app_state["last_state_change"]
+                    if last_change is not None:
+                        elapsed = (current_ts - last_change).total_seconds()
+                        if elapsed < app_cfg.switch_interval:
+                            app_state["last_reason"] = f"Skipped ({reason}): Cooldown ({int(elapsed)}s < {app_cfg.switch_interval}s)"
+                            all_reasons.append(f"{app_cfg.name}: Skipped (Cooldown)")
+                            continue
+            # --------------------------------------
+
+            app_state["last_reason"] = reason
+            all_reasons.append(f"{app_cfg.name}: {reason}")
             
+            state_changed = False
             if action == Action.ON:
-                if not app_states[app_id]["is_on"]:
-                    app_states[app_id]["is_on"] = True
-                    if config_by_id[app_id].dynamic_current and decision.target_current is not None:
-                        app_states[app_id]["current_amperage"] = decision.target_current
-                        app_states[app_id]["current_power"] = decision.target_current * 230.0 * config_by_id[app_id].phases
+                if not is_on:
+                    app_state["is_on"] = True
+                    state_changed = True
+                    if app_cfg.dynamic_current and decision.target_current is not None:
+                        app_state["current_amperage"] = decision.target_current
+                        app_state["current_power"] = decision.target_current * 230.0 * app_cfg.phases
                     else:
-                        app_states[app_id]["current_power"] = config_by_id[app_id].nominal_power
-                        if config_by_id[app_id].dynamic_current:
-                            app_states[app_id]["current_amperage"] = config_by_id[app_id].nominal_power / 230.0
+                        app_state["current_power"] = app_cfg.nominal_power
+                        if app_cfg.dynamic_current:
+                            app_state["current_amperage"] = app_cfg.nominal_power / 230.0
                 # If already ON, Action.ON (staying on) maintains the current_power/amperage
             elif action == Action.OFF:
-                app_states[app_id]["is_on"] = False
-                app_states[app_id]["current_power"] = 0.0
-                app_states[app_id]["current_amperage"] = None
+                if is_on:
+                    app_state["is_on"] = False
+                    app_state["current_power"] = 0.0
+                    app_state["current_amperage"] = None
+                    state_changed = True
             elif action == Action.SET_CURRENT:
-                app_states[app_id]["is_on"] = True
-                app_states[app_id]["current_amperage"] = decision.target_current
-                app_states[app_id]["current_power"] = decision.target_current * 230.0 * config_by_id[app_id].phases
+                if not is_on:
+                    app_state["is_on"] = True
+                    state_changed = True
+                app_state["current_amperage"] = decision.target_current
+                app_state["current_power"] = decision.target_current * 230.0 * app_cfg.phases
             elif action == Action.IDLE:
                 # IDLE does not change the state of the device
                 pass
+
+            if state_changed:
+                app_state["last_state_change"] = current_ts
                 
         # Store feedback battery limits for next iteration
         if result.battery_discharge_action.should_limit:
@@ -498,6 +528,8 @@ def execute_scenario(config_name: str, dataset_name: str, planner_only: bool = F
             "battery_soc": round(battery_soc, 2),
             "grid_import": round(grid_import, 1),
             "grid_export": round(grid_export, 1),
+            "buy_price": tariff.current_price,
+            "sell_price": tariff.feed_in_tariff,
             "decision": reasons_str
         }
         for app in appliance_configs:
@@ -508,7 +540,8 @@ def execute_scenario(config_name: str, dataset_name: str, planner_only: bool = F
         
     # 4. EXPORT OUTPUT REPORTING FILES
     export_results_to_csv(simulation_records, "optimization_result.csv", output_subfolder=subfolder)
-    generate_plotly_dashboard(simulation_records, appliance_configs, "optimization_result.html", output_subfolder=subfolder)
+    generate_plotly_dashboard(simulation_records, appliance_configs, "optimization_result.html", output_subfolder=subfolder, config_name=config_name, scenario_name=dataset_name)
+    generate_comparison_dashboard(simulation_records, appliance_configs, "optimization_comparison.html", output_subfolder=subfolder, config_name=config_name, scenario_name=dataset_name)
 
     # 5. GENERATE TEXTUAL SUMMARY
     summary_lines = []
@@ -520,13 +553,23 @@ def execute_scenario(config_name: str, dataset_name: str, planner_only: bool = F
     total_import_wh = 0.0
     total_export_wh = 0.0
     total_house_load_wh = 0.0
+    total_import_cost = 0.0
+    total_export_revenue = 0.0
     appliance_totals_wh = {app.id: 0.0 for app in appliance_configs}
     
     for rec in simulation_records:
-        total_pv_wh += rec.get("pv", 0.0) * (step_minutes / 60.0)
-        total_import_wh += rec.get("grid_import", 0.0) * (step_minutes / 60.0)
-        total_export_wh += rec.get("grid_export", 0.0) * (step_minutes / 60.0)
+        import_wh = rec.get("grid_import", 0.0) * (step_minutes / 60.0)
+        export_wh = rec.get("grid_export", 0.0) * (step_minutes / 60.0)
+        pv_wh = rec.get("pv", 0.0) * (step_minutes / 60.0)
+        
+        total_pv_wh += pv_wh
+        total_import_wh += import_wh
+        total_export_wh += export_wh
         total_house_load_wh += rec.get("house_load", 0.0) * (step_minutes / 60.0)
+        
+        total_import_cost += (import_wh / 1000.0) * rec.get("buy_price", 0.0)
+        total_export_revenue += (export_wh / 1000.0) * rec.get("sell_price", 0.0)
+        
         for app in appliance_configs:
             appliance_totals_wh[app.id] += rec.get(f"{app.id}_power", 0.0) * (step_minutes / 60.0)
             
@@ -537,18 +580,29 @@ def execute_scenario(config_name: str, dataset_name: str, planner_only: bool = F
     else:
         self_sufficiency = 100.0
         
+    if total_pv_wh > 0:
+        self_consumption = max(0.0, (total_pv_wh - total_export_wh) / total_pv_wh * 100.0)
+    else:
+        self_consumption = 100.0
+        
     summary_lines.append(f" Total PV Production:        {total_pv_wh / 1000.0:>8.2f} kWh")
     summary_lines.append(f" Total Grid Import:          {total_import_wh / 1000.0:>8.2f} kWh")
     summary_lines.append(f" Total Grid Export:          {total_export_wh / 1000.0:>8.2f} kWh")
     summary_lines.append(f" Total Consumption:          {total_consumption_wh / 1000.0:>8.2f} kWh")
     summary_lines.append("-" * 60)
+    summary_lines.append(f" Base House Load:            {total_house_load_wh / 1000.0:>8.2f} kWh")
     summary_lines.append(" Appliance Breakdown:")
     for app in appliance_configs:
         summary_lines.append(f"   - {app.name:<21} {appliance_totals_wh[app.id] / 1000.0:>8.2f} kWh")
     summary_lines.append("-" * 60)
     final_soc = simulation_records[-1]["battery_soc"] if simulation_records else battery_soc
     summary_lines.append(f" Final Battery SoC:          {final_soc:>8.1f} %")
-    summary_lines.append(f" Self-Sufficiency:           {self_sufficiency:>8.1f} %")
+    summary_lines.append(f" Self-Sufficiency (SSI):     {self_sufficiency:>8.1f} %")
+    summary_lines.append(f" Self-Consumption (SCI):     {self_consumption:>8.1f} %")
+    summary_lines.append("-" * 60)
+    summary_lines.append(f" Total Import Cost:          € {total_import_cost:>6.2f}")
+    summary_lines.append(f" Total Export Revenue:       € {total_export_revenue:>6.2f}")
+    summary_lines.append(f" Net Cost (Cost - Rev):      € {total_import_cost - total_export_revenue:>6.2f}")
     summary_lines.append("="*60 + "\n")
     
     summary_text = "\n".join(summary_lines)

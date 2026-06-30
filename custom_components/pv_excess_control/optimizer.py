@@ -65,6 +65,20 @@ class Optimizer:
         # Initialised here for safety; optimize() overwrites both on every cycle.
         self._plan_influence: str = "none"
         self._grid_supplement_count: int = 0
+        self._current_time: datetime | None = None
+
+    def _get_current_time_field(self) -> time:
+        from datetime import datetime
+        now = self._current_time
+        if now is None:
+            return datetime.now(self._tz).time() if self._tz else datetime.now().time()
+        
+        if self._tz is not None:
+            if now.tzinfo is None:
+                now = now.replace(tzinfo=self._tz)
+            else:
+                now = now.astimezone(self._tz)
+        return now.time()
 
     def optimize(
         self,
@@ -89,6 +103,7 @@ class Optimizer:
         """
         self._plan_influence = plan_influence
         self._grid_supplement_count = 0
+        self._current_time = power_state.timestamp
 
         # Build lookup of appliance states by ID
         state_by_id: dict[str, ApplianceState] = {
@@ -270,7 +285,14 @@ class Optimizer:
         """Check if the plan has an ON entry for this appliance in the current time window."""
         from datetime import datetime
         # Use HA timezone if configured, otherwise fall back to system local timezone.
-        now = datetime.now(self._tz) if self._tz else datetime.now().astimezone()
+        now = self._current_time
+        if now is None:
+            now = datetime.now(self._tz) if self._tz else datetime.now().astimezone()
+        elif self._tz is not None:
+            if now.tzinfo is None:
+                now = now.replace(tzinfo=self._tz)
+            else:
+                now = now.astimezone(self._tz)
         for entry in plan.entries:
             if entry.appliance_id != appliance_id:
                 continue
@@ -537,8 +559,7 @@ class Optimizer:
 
         # Time window check: restrict appliance to specific operating hours
         if appliance.start_after is not None or appliance.end_before is not None:
-            from datetime import datetime
-            current_time = datetime.now(self._tz).time() if self._tz else datetime.now().time()
+            current_time = self._get_current_time_field()
             if not self._is_within_time_window(current_time, appliance.start_after, appliance.end_before):
                 action = Action.OFF if state.is_on else Action.IDLE
                 # Build a descriptive reason
@@ -964,8 +985,7 @@ class Optimizer:
             and appliance.min_daily_runtime is not None
             and state.runtime_today < appliance.min_daily_runtime
         ):
-            from datetime import datetime
-            current_time = datetime.now(self._tz).time() if self._tz else datetime.now().time()
+            current_time = self._get_current_time_field()
             deadline = appliance.schedule_deadline
             remaining_runtime = (appliance.min_daily_runtime - state.runtime_today).total_seconds()
 
@@ -1087,8 +1107,7 @@ class Optimizer:
                 and appliance.min_daily_runtime is not None
                 and state.runtime_today < appliance.min_daily_runtime
             ):
-                from datetime import datetime
-                current_time = datetime.now(self._tz).time() if self._tz else datetime.now().time()
+                current_time = self._get_current_time_field()
                 deadline = appliance.schedule_deadline
                 remaining_runtime = (appliance.min_daily_runtime - state.runtime_today).total_seconds()
                 now_seconds = current_time.hour * 3600 + current_time.minute * 60 + current_time.second
